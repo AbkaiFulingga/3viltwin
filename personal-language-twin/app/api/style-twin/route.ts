@@ -1,18 +1,17 @@
 import { NextRequest } from 'next/server';
-import { supabase } from '@/lib/supabase';
 import { createClient } from '@supabase/supabase-js';
 import { OpenAI } from 'openai';
 
-// Initialize hackclub OpenAI client
+// Initialize hackAI client
 const openai = new OpenAI({
-  baseURL: 'https://ai.hackclub.com/proxy/v1',
-  apiKey: 'sk-hc-v1-6f2c16af985545bea904dc0c86a09898e28b95c5d60141aa90b5beda0334b0c1',
+  baseURL: process.env.OPENAI_BASE_URL || 'https://ai.hackclub.com/proxy/v1',
+  apiKey: process.env.OPENAI_API_KEY!,
 });
 
-// Initialize our Supabase client
+// Initialize Supabase client with service role key for full access
 const supabaseClient = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  process.env.SUPABASE_SERVICE_ROLE_KEY! // Use service role key for admin operations
 );
 
 export async function POST(req: NextRequest) {
@@ -23,10 +22,10 @@ export async function POST(req: NextRequest) {
       return Response.json({ error: 'Missing userId or prompt' }, { status: 400 });
     }
 
-    // Get the user's style vector
+    // Get the user's style vector and metrics
     const { data: userProfile, error: profileError } = await supabaseClient
       .from('user_profiles')
-      .select('style_vector')
+      .select('style_vector, formality_level, avg_sentence_length, unique_words_count, positive_tone_percentage, signature_phrases')
       .eq('id', userId)
       .single();
 
@@ -34,30 +33,30 @@ export async function POST(req: NextRequest) {
       return Response.json({ error: 'User profile not found' }, { status: 404 });
     }
 
-    // Get the top 10 most similar writing samples to the style
-    const similarSamples = await getSimilarSamples(userId, userProfile.style_vector, 10);
+    // Get the users writing samples
+    const writingSamples = await getUserWritingSamples(userId);
 
     // Build the system prompt with style context
-    const systemPrompt = buildSystemPrompt(similarSamples, userProfile.style_vector);
+    const systemPrompt = buildSystemPrompt(writingSamples, userProfile);
 
     // Generate text using the style-blended prompt
     const completion = await openai.chat.completions.create({
-      model: 'qwen/qwen3-32b',
+      model: process.env.GENERATION_MODEL || 'qwen/qwen3-32b',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: prompt }
       ],
       temperature: 0.7,
-      max_tokens: 500, // Probably need to configure this based on the use case
+      max_tokens: 500,
     });
 
-    const generatedText = completion.choices[0].message.content;
+    const generatedText = completion.choices[0].message?.content || '';
 
     // Log the generation to history
     await logGenerationHistory(userId, prompt, generatedText);
 
-    return Response.json({ 
-      success: true, 
+    return Response.json({
+      success: true,
       generatedText,
       styleVector: userProfile.style_vector
     });
@@ -67,18 +66,17 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// Function to get similar samples based on embedding similarity
-async function getSimilarSamples(userId: string, styleVector: number[], limit: number) {
-  // In a real implementation, we would use pgvector to find similar embeddings
-  // For now, we'll simulate this by fetching random samples
+// Function to get user's writing samples
+async function getUserWritingSamples(userId: string) {
   const { data: samples, error } = await supabaseClient
     .from('writing_samples')
     .select('raw_text')
     .eq('user_id', userId)
-    .limit(limit);
+    .order('created_at', { ascending: false }) // Get most recent samples first
+    .limit(10);
 
   if (error) {
-    console.error('Error fetching similar samples:', error);
+    console.error('Error fetching user samples:', error);
     return [];
   }
 
@@ -86,24 +84,38 @@ async function getSimilarSamples(userId: string, styleVector: number[], limit: n
 }
 
 // Function to build the system prompt with style context
-function buildSystemPrompt(similarSamples: any[], styleVector: number[]): string {
-  // Convert similar samples to text
-  const sampleTexts = similarSamples.map(sample => sample.raw_text).join('\n\n');
-  
+function buildSystemPrompt(samples: any[], userProfile: any): string {
+  // Convert samples to text
+  const sampleTexts = samples.map(sample => sample.raw_text).join('\n\n');
+
+  // Format user metrics for the prompt
+  const formalityLevel = userProfile.formality_level || 5; // Default to neutral
+  const avgSentenceLength = userProfile.avg_sentence_length || 15;
+  const positiveTone = userProfile.positive_tone_percentage || 50;
+  const signaturePhrases = userProfile.signature_phrases?.join(', ') || 'none identified yet';
+
   return `
-    You are a writing engine that must produce text in the exact style of the user.
-    Here is the user's style vector context:
-    ${sampleTexts ? `SAMPLES:\n${sampleTexts}\n\n` : ''}
-    
-    Here are key characteristics derived from the user's writing:
-    - Maintain similar formality level
-    - Use comparable sentence structures
-    - Match vocabulary complexity
-    - Preserve rhythm and tone
-    - Follow similar punctuation patterns
-    
-    You must use tone, sentence structure, vocabulary, and rhythm similar to the user.
-    The output should feel like it was written exactly like the same person.
+    You are an AI writing assistant that must produce text in the exact style of the user.
+
+    USER'S WRITING SAMPLES:
+    ${sampleTexts ? `${sampleTexts}\n\n` : 'No samples provided.\n\n'}
+
+    USER'S WRITING CHARACTERISTICS:
+    - Formality level: ${formalityLevel}/10 (1=very casual, 10=very formal)
+    - Average sentence length: ~${avgSentenceLength} words
+    - Positive tone: ${positiveTone}% of words are positive
+    - Signature phrases: ${signaturePhrases}
+
+    STYLE GUIDELINES:
+    - Match the formality level of the user
+    - Use similar sentence structures and lengths
+    - Include similar vocabulary complexity
+    - Maintain the same rhythm and tone
+    - Use similar punctuation patterns
+    - Include signature phrases when appropriate
+
+    Generate text that feels like it was written by the same person.
+    The output should be indistinguishable from the user's own writing.
   `;
 }
 
