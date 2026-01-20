@@ -1,18 +1,17 @@
 import { NextRequest } from 'next/server';
-import { supabase } from '@/lib/supabase';
 import { createClient } from '@supabase/supabase-js';
 import { OpenAI } from 'openai';
 
-// Initialize hackclub AI
+// Initialize OpenAI client
 const openai = new OpenAI({
-  baseURL: 'https://ai.hackclub.com/proxy/v1',
-  apiKey: 'sk-hc-v1-6f2c16af985545bea904dc0c86a09898e28b95c5d60141aa90b5beda0334b0c1',
+  baseURL: process.env.OPENAI_BASE_URL || 'https://ai.hackclub.com/proxy/v1',
+  apiKey: process.env.OPENAI_API_KEY!,
 });
 
-// Initialize our Supabase client
+// Initialize Supabase client with service role key for full access
 const supabaseClient = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  process.env.SUPABASE_SERVICE_ROLE_KEY! // Use service role key for admin operations
 );
 
 export async function POST(req: NextRequest) {
@@ -30,13 +29,13 @@ export async function POST(req: NextRequest) {
     // Process each chunk to generate embeddings
     const embeddingPromises = chunks.map(async (chunk) => {
       const embeddingResponse = await openai.embeddings.create({
-        model: 'qwen/qwen3-embedding-8b',
+        model: process.env.EMBEDDING_MODEL || 'qwen/qwen3-embedding-8b',
         input: chunk,
       });
 
       return {
         id: crypto.randomUUID(),
-        user_id: userId,
+        user_id: userId, // This should be a valid UUID
         raw_text: chunk,
         embedding: embeddingResponse.data[0].embedding,
         metadata: {
@@ -48,6 +47,9 @@ export async function POST(req: NextRequest) {
 
     const embeddings = await Promise.all(embeddingPromises);
 
+    // First ensure the user profile exists
+    await initializeUserProfileIfNeeded(userId);
+
     // Insert embeddings into Supabase
     const { data, error } = await supabaseClient
       .from('writing_samples')
@@ -56,13 +58,36 @@ export async function POST(req: NextRequest) {
 
     if (error) {
       console.error('Error inserting embeddings:', error);
-      return Response.json({ error: 'Failed to store embeddings' }, { status: 500 });
+      console.error('Error details:', {
+        message: error.message,
+        code: error.code,
+        hint: error.hint,
+        details: error.details
+      });
+      return Response.json({
+        error: 'Failed to store embeddings',
+        details: {
+          message: error.message,
+          code: error.code,
+          hint: error.hint
+        }
+      }, { status: 500 });
     }
 
     // Update the user's style vector
     await updateUserStyleVector(userId);
 
-    return Response.json({ success: true, count: embeddings.length });
+    // Also analyze text metrics
+    const metrics = analyzeTextMetrics(rawText);
+
+    // Update user profile with metrics
+    await updateUserMetrics(userId, metrics);
+
+    return Response.json({
+      success: true,
+      count: embeddings.length,
+      metrics: metrics
+    });
   } catch (error) {
     console.error('Error processing writing sample:', error);
     return Response.json({ error: 'Internal server error' }, { status: 500 });
@@ -166,4 +191,165 @@ function calculateAverageEmbedding(embeddings: number[][]): number[] {
   }
 
   return avgEmbedding;
+}
+
+// Function to analyze text metrics
+function analyzeTextMetrics(text: string) {
+  // Count sentences
+  const sentenceCount = (text.match(/[.!?]+/g) || []).length;
+
+  // Count words
+  const wordCount = text.split(/\s+/).filter(word => word.length > 0).length;
+
+  // Calculate average sentence length
+  const avgSentenceLength = sentenceCount > 0 ? Math.round(wordCount / sentenceCount) : 0;
+
+  // Count unique words
+  const words = text.toLowerCase().match(/\b\w+\b/g) || [];
+  const uniqueWords = new Set(words).size;
+
+  // Analyze sentiment (simple heuristic)
+  const positiveWords = ['good', 'great', 'excellent', 'amazing', 'wonderful', 'fantastic', 'love', 'like', 'enjoy', 'happy', 'pleased', 'satisfied'];
+  const negativeWords = ['bad', 'terrible', 'awful', 'horrible', 'hate', 'dislike', 'sad', 'angry', 'frustrated', 'disappointed'];
+
+  let positiveCount = 0;
+  let negativeCount = 0;
+
+  for (const word of words) {
+    if (positiveWords.includes(word)) positiveCount++;
+    if (negativeWords.includes(word)) negativeCount++;
+  }
+
+  const positiveTone = wordCount > 0 ? Math.round((positiveCount / wordCount) * 100) : 0;
+
+  // Detect formality level (simple heuristic)
+  const formalMarkers = ['regarding', 'concerning', 'pursuant', 'herewith', 'whereas', 'therefore', 'moreover', 'furthermore', 'nevertheless'];
+  const informalMarkers = ['gonna', 'wanna', 'kinda', 'sorta', 'y\'all', 'dude', 'cool', 'awesome', 'totally', 'basically'];
+
+  let formalityScore = 0;
+  for (const word of words) {
+    if (formalMarkers.includes(word)) formalityScore++;
+    if (informalMarkers.includes(word)) formalityScore--;
+  }
+
+  // Normalize formality score to 0-10 scale
+  const formalityLevel = Math.max(0, Math.min(10, 5 + (formalityScore / Math.max(1, wordCount / 100))));
+
+  // Find common phrases
+  const phrases = findCommonPhrases(text);
+
+  return {
+    avgSentenceLength,
+    uniqueWords,
+    positiveTone,
+    formalityLevel,
+    commonPhrases: phrases.slice(0, 5) // Top 5 phrases
+  };
+}
+
+// Function to find common phrases in text
+function findCommonPhrases(text: string): string[] {
+  const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+  const phraseCounts: Record<string, number> = {};
+
+  for (const sentence of sentences) {
+    const words = sentence.toLowerCase().match(/\b\w+\b/g) || [];
+
+    // Look for 2-3 word phrases
+    for (let i = 0; i < words.length - 1; i++) {
+      const phrase2 = words.slice(i, i + 2).join(' ');
+      phraseCounts[phrase2] = (phraseCounts[phrase2] || 0) + 1;
+
+      if (i < words.length - 2) {
+        const phrase3 = words.slice(i, i + 3).join(' ');
+        phraseCounts[phrase3] = (phraseCounts[phrase3] || 0) + 1;
+      }
+    }
+  }
+
+  // Sort phrases by frequency and return top ones
+  return Object.entries(phraseCounts)
+    .filter(([_, count]) => count > 1) // Only phrases that appear more than once
+    .sort((a, b) => b[1] - a[1])
+    .map(([phrase, _]) => phrase.charAt(0).toUpperCase() + phrase.slice(1));
+}
+
+// Function to initialize user profile if it doesn't exist
+async function initializeUserProfileIfNeeded(userId: string) {
+  // Check if the user profile already exists
+  const { data: existingProfile, error: selectError } = await supabaseClient
+    .from('user_profiles')
+    .select('id')
+    .eq('id', userId)
+    .single();
+
+  if (selectError && selectError.code === 'PGRST116') { // Row not found
+    // Create a new user profile with default values
+    const { error: insertError } = await supabaseClient
+      .from('user_profiles')
+      .insert([{
+        id: userId,
+        formality_level: 0,
+        avg_sentence_length: 0,
+        unique_words_count: 0,
+        positive_tone_percentage: 0,
+        signature_phrases: [],
+        style_vector: null
+      }]);
+
+    if (insertError) {
+      console.error('Error creating initial user profile:', insertError);
+    }
+  } else if (selectError) {
+    console.error('Error checking user profile existence:', selectError);
+  }
+}
+
+// Function to update user metrics
+async function updateUserMetrics(userId: string, metrics: any) {
+  // First, check if the user profile exists
+  const { data: existingProfile, error: selectError } = await supabaseClient
+    .from('user_profiles')
+    .select('id')
+    .eq('id', userId)
+    .single();
+
+  if (selectError && selectError.code !== 'PGRST116') { // PGRST116 is "Row not found"
+    console.error('Error checking user profile:', selectError);
+    return;
+  }
+
+  if (existingProfile) {
+    // Update existing profile
+    const { error } = await supabaseClient
+      .from('user_profiles')
+      .update({
+        formality_level: metrics.formalityLevel,
+        avg_sentence_length: metrics.avgSentenceLength,
+        unique_words_count: metrics.uniqueWords,
+        positive_tone_percentage: metrics.positiveTone,
+        signature_phrases: metrics.commonPhrases
+      })
+      .eq('id', userId);
+
+    if (error) {
+      console.error('Error updating user metrics:', error);
+    }
+  } else {
+    // Insert new profile
+    const { error } = await supabaseClient
+      .from('user_profiles')
+      .insert([{
+        id: userId,
+        formality_level: metrics.formalityLevel,
+        avg_sentence_length: metrics.avgSentenceLength,
+        unique_words_count: metrics.uniqueWords,
+        positive_tone_percentage: metrics.positiveTone,
+        signature_phrases: metrics.commonPhrases
+      }]);
+
+    if (error) {
+      console.error('Error creating user profile:', error);
+    }
+  }
 }
