@@ -57,3 +57,31 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Minimalist styling overrides */
+.card {
+  box-shadow: none;
+  border: 1px solid hsl(var(--border));
+}
+
+.button {
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.textarea {
+  border-radius: 4px;
+  border: 1px solid hsl(var(--border));
+}
+
+.progress {
+  border-radius: 2px;
+  height: 8px;
+  overflow: hidden;
+}
+
+.badge {
+  border-radius: 12px;
+  padding: 2px 8px;
+  font-weight: 500;
+}

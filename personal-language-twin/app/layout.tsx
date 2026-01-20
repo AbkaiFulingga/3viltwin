@@ -6,7 +6,7 @@ const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
   title: '3viltwin AI',
-  description: 'Your evil twin AI writing assistant that mimics your unique voice',
+  description: 'Your personalized AI writing assistant that learns and mimics your unique voice and style',
 };
 
 export default function RootLayout({
