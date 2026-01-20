@@ -1,18 +1,17 @@
 import { NextRequest } from 'next/server';
-import { supabase } from '@/lib/supabase';
 import { createClient } from '@supabase/supabase-js';
 import { OpenAI } from 'openai';
 
-// Initialize hackAI client
+// Initialize OpenAI client
 const openai = new OpenAI({
-  baseURL: 'https://ai.hackclub.com/proxy/v1',
-  apiKey: 'sk-hc-v1-6f2c16af985545bea904dc0c86a09898e28b95c5d60141aa90b5beda0334b0c1',
+  baseURL: process.env.OPENAI_BASE_URL || 'https://ai.hackclub.com/proxy/v1',
+  apiKey: process.env.OPENAI_API_KEY!,
 });
 
-// Initialize the Supabase client
+// Initialize Supabase client with service role key for full access
 const supabaseClient = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  process.env.SUPABASE_SERVICE_ROLE_KEY! // Use service role key for admin operations
 );
 
 export async function POST(req: NextRequest) {
@@ -23,10 +22,10 @@ export async function POST(req: NextRequest) {
       return Response.json({ error: 'Missing userId or generatedText' }, { status: 400 });
     }
 
-    // Get the user's style vector
+    // Get the user's style vector and metrics
     const { data: userProfile, error: profileError } = await supabaseClient
       .from('user_profiles')
-      .select('style_vector')
+      .select('style_vector, formality_level, avg_sentence_length, unique_words_count, positive_tone_percentage, signature_phrases')
       .eq('id', userId)
       .single();
 
@@ -36,15 +35,15 @@ export async function POST(req: NextRequest) {
 
     // Generate embedding for the generated text
     const embeddingResponse = await openai.embeddings.create({
-      model: 'qwen/qwen3-embedding-8b',
+      model: process.env.EMBEDDING_MODEL || 'qwen/qwen3-embedding-8b',
       input: generatedText,
     });
 
     const generatedTextEmbedding = embeddingResponse.data[0].embedding;
 
-    // Calculate cos similarity with user's style vector
+    // Calculate cosine similarity with user's style vector
     const cosineSimilarity = calculateCosineSimilarity(
-      generatedTextEmbedding, 
+      generatedTextEmbedding,
       userProfile.style_vector
     );
 
@@ -58,8 +57,8 @@ export async function POST(req: NextRequest) {
       driftLevel = 'high'; // High drift
     }
 
-    return Response.json({ 
-      success: true, 
+    return Response.json({
+      success: true,
       driftScore: cosineSimilarity,
       driftLevel,
       similarityPercentage: Math.round(cosineSimilarity * 100)
