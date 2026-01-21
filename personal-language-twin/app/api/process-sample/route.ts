@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { OpenAI } from 'openai';
 
-// Initialize OpenAI client
+// Initialize OpenAI(well hackAI) client
 const openai = new OpenAI({
   baseURL: process.env.OPENAI_BASE_URL || 'https://ai.hackclub.com/proxy/v1',
   apiKey: process.env.OPENAI_API_KEY!,
